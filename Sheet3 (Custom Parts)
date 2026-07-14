@@ -1,0 +1,92 @@
+Option Explicit
+
+Private Sub Worksheet_Change(ByVal Target As Range)
+    On Error GoTo SafeExit
+
+    'Only watch Part Number column (A), ignoring header row
+    Dim rngWatch As Range
+    Set rngWatch = Intersect(Target, Me.Range("A2:A" & Me.Rows.Count))
+    If rngWatch Is Nothing Then Exit Sub
+
+    Application.EnableEvents = False
+
+    Dim c As Range
+    For Each c In rngWatch.Cells
+        Dim part As String
+        part = Trim(CStr(c.Value))
+
+        'Allow blank clears
+        If part = "" Then GoTo NextCell
+
+        'Optional: normalize to avoid "abc" vs "ABC" being treated as different
+        'Uncomment next line if you want case-insensitive uniqueness
+        'part = UCase$(part): c.Value = part
+
+        '1) Must be unique in Custom Parts column A (excluding itself)
+        If Not IsUniqueInColumnA(Me, c.Row, part) Then
+            MsgBox "Part Number must be unique within 'Custom Parts'." & vbCrLf & _
+                   "Duplicate: " & part, vbExclamation, "Invalid Part Number"
+            c.ClearContents
+            GoTo NextCell
+        End If
+
+        '2) Must not exist in MIC sheet Column A starting at A2
+        If ExistsInMIC(part) Then
+            MsgBox "Part Number already exists in 'MIC' (Column A)." & vbCrLf & _
+                   "Not allowed: " & part, vbExclamation, "Invalid Part Number"
+            c.ClearContents
+            GoTo NextCell
+        End If
+
+NextCell:
+    Next c
+
+SafeExit:
+    Application.EnableEvents = True
+End Sub
+
+Private Function IsUniqueInColumnA(ws As Worksheet, changedRow As Long, part As String) As Boolean
+    'Counts matches in A2:A(last). If any match besides the edited cell, it's not unique.
+    Dim lastRow As Long
+    lastRow = ws.Cells(ws.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 2 Then
+        IsUniqueInColumnA = True
+        Exit Function
+    End If
+
+    Dim rng As Range
+    Set rng = ws.Range("A2:A" & lastRow)
+
+    Dim cnt As Long
+    cnt = Application.WorksheetFunction.CountIf(rng, part)
+
+    'If the edited cell contains that part, CountIf includes it, so unique is cnt = 1
+    'But if user pasted multiple cells, this logic still works per-cell in the loop.
+    IsUniqueInColumnA = (cnt <= 1)
+End Function
+
+Private Function ExistsInMIC(part As String) As Boolean
+    Dim wsMIC As Worksheet
+    On Error Resume Next
+    Set wsMIC = ThisWorkbook.Worksheets("MIC")
+    On Error GoTo 0
+
+    If wsMIC Is Nothing Then
+        ExistsInMIC = False
+        Exit Function
+    End If
+
+    Dim lastRow As Long
+    lastRow = wsMIC.Cells(wsMIC.Rows.Count, "A").End(xlUp).Row
+    If lastRow < 2 Then
+        ExistsInMIC = False
+        Exit Function
+    End If
+
+    Dim rng As Range
+    Set rng = wsMIC.Range("A2:A" & lastRow)
+
+    ExistsInMIC = (Application.WorksheetFunction.CountIf(rng, part) > 0)
+End Function
+
+
