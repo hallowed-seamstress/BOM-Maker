@@ -1,0 +1,149 @@
+Option Explicit
+
+' -----------------------------
+' VeryHidden consolidated list
+' -----------------------------
+Public Const PARTS_LIST_SHEET As String = "_SYS_PARTS"
+Public Const PARTS_NAMED_RANGE As String = "PartsDropdown"
+
+' Rebuilds the consolidated Part # list from:
+'   MIC!A2:A(last) and Custom Parts!A2:A(last)
+' Skips row 1 headers (e.g., "MIC Number")
+Public Sub RefreshPartsDropdown(Optional ByVal sortList As Boolean = True)
+    Dim dict As Object
+    Dim wsList As Worksheet
+    Dim wsMIC As Worksheet, wsCustom As Worksheet
+    Dim lastRow As Long, r As Long
+    Dim partVal As String
+    Dim keys As Variant
+    Dim i As Long
+
+    Set dict = CreateObject("Scripting.Dictionary")
+    dict.CompareMode = vbTextCompare ' treat part numbers case-insensitively
+
+    Set wsList = EnsurePartsListSheet()
+
+    ' -----------------------------
+    ' MIC (skip header row)
+    ' -----------------------------
+    On Error Resume Next
+    Set wsMIC = ThisWorkbook.Worksheets("MIC")
+    On Error GoTo 0
+
+    If Not wsMIC Is Nothing Then
+        lastRow = wsMIC.Cells(wsMIC.Rows.Count, 1).End(xlUp).Row
+        If lastRow < 2 Then lastRow = 2
+
+        For r = 2 To lastRow
+            partVal = Trim$(CStr(wsMIC.Cells(r, 1).Value))
+            If Len(partVal) > 0 Then
+                dict(partVal) = True
+            End If
+        Next r
+    End If
+
+    ' -----------------------------
+    ' Custom Parts (skip header row)
+    ' -----------------------------
+    On Error Resume Next
+    Set wsCustom = ThisWorkbook.Worksheets("Custom Parts")
+    On Error GoTo 0
+
+    If Not wsCustom Is Nothing Then
+        lastRow = wsCustom.Cells(wsCustom.Rows.Count, 1).End(xlUp).Row
+        If lastRow < 2 Then lastRow = 2
+
+        For r = 2 To lastRow
+            partVal = Trim$(CStr(wsCustom.Cells(r, 1).Value))
+            If Len(partVal) > 0 Then
+                dict(partVal) = True
+            End If
+        Next r
+    End If
+
+    ' -----------------------------
+    ' Write list to helper sheet
+    ' -----------------------------
+    wsList.Cells.ClearContents
+    wsList.Range("A1").Value = "Parts"
+
+    If dict.Count = 0 Then
+        wsList.Range("A2").Value = vbNullString
+        UpdateNamedRange wsList, 2
+        Exit Sub
+    End If
+
+    keys = dict.keys
+    If sortList And dict.Count > 1 Then
+        QuickSortVariantStrings keys, LBound(keys), UBound(keys)
+    End If
+
+    For i = LBound(keys) To UBound(keys)
+        wsList.Cells(i + 2, 1).Value = CStr(keys(i))
+    Next i
+
+    ' Named range points to A2:A(last item row)
+    UpdateNamedRange wsList, dict.Count + 1
+End Sub
+
+' Ensures the helper list sheet exists and is VeryHidden
+Public Function EnsurePartsListSheet() As Worksheet
+    Dim ws As Worksheet
+
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(PARTS_LIST_SHEET)
+    On Error GoTo 0
+
+    If ws Is Nothing Then
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = PARTS_LIST_SHEET
+    End If
+
+    ws.Visible = xlSheetVeryHidden
+    Set EnsurePartsListSheet = ws
+End Function
+
+' Creates/refreshes the workbook-level named range PartsDropdown
+Private Sub UpdateNamedRange(ByVal wsList As Worksheet, ByVal lastRow As Long)
+    Dim rng As Range
+
+    If lastRow < 2 Then lastRow = 2
+    Set rng = wsList.Range("A2:A" & lastRow)
+
+    On Error Resume Next
+    ThisWorkbook.Names(PARTS_NAMED_RANGE).Delete
+    On Error GoTo 0
+
+    ThisWorkbook.Names.Add Name:=PARTS_NAMED_RANGE, RefersTo:=rng
+End Sub
+
+' QuickSort for a Variant array of strings
+Private Sub QuickSortVariantStrings(ByRef arr As Variant, ByVal first As Long, ByVal last As Long)
+    Dim i As Long, j As Long
+    Dim pivot As String
+    Dim tmp As Variant
+
+    i = first
+    j = last
+    pivot = CStr(arr((first + last) \ 2))
+
+    Do While i <= j
+        Do While CStr(arr(i)) < pivot
+            i = i + 1
+        Loop
+        Do While CStr(arr(j)) > pivot
+            j = j - 1
+        Loop
+        If i <= j Then
+            tmp = arr(i)
+            arr(i) = arr(j)
+            arr(j) = tmp
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+
+    If first < j Then QuickSortVariantStrings arr, first, j
+    If i < last Then QuickSortVariantStrings arr, i, last
+End Sub
+
