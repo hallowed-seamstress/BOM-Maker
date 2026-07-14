@@ -1,0 +1,427 @@
+Option Explicit
+
+' =========================
+' CONFIG
+' =========================
+Private Const MAX_DATA_ROWS As Long = 100
+
+' Column E used as hidden link (white text approach you requested)
+Private Const LINK_COL As Long = 5   ' E
+
+' Marker to identify sheets created/managed by this system
+Private Const MARKER_CELL As String = "XFD1"
+Private Const MARKER_VALUE As String = "__AUTO_ASSEMBLY__"
+
+' VeryHidden helper sheet that stores the combined dropdown list
+Private Const PARTS_LIST_SHEET As String = "_SYS_PARTS"
+Private Const PARTS_NAMED_RANGE As String = "PartsDropdown"
+
+' Sheets never deleted by cleanup
+Private Const EXCLUDE_1 As String = "BOM"
+Private Const EXCLUDE_2 As String = "MIC"
+Private Const EXCLUDE_3 As String = "Assembly List"
+Private Const EXCLUDE_4 As String = "Custom Parts"
+
+' =========================
+' EVENT
+' =========================
+Private Sub Worksheet_Change(ByVal Target As Range)
+    Dim rng As Range, cell As Range
+    Dim prevCalc As XlCalculation
+
+    Set rng = Intersect(Target, Me.Range("A2:A" & Me.Rows.Count))
+    If rng Is Nothing Then Exit Sub
+
+    On Error GoTo CleanFail
+
+    Application.EnableEvents = False
+    Application.ScreenUpdating = False
+    prevCalc = Application.Calculation
+    Application.Calculation = xlCalculationManual
+
+    ' Ensure Column E is visually hidden
+    MakeLinkColumnInvisible
+
+    ' Keep the combined dropdown list current
+    RefreshCombinedPartsDropdown
+
+    For Each cell In rng.Cells
+        ProcessAssemblyCell cell
+    Next cell
+
+    CleanupOrphanAutoSheets
+
+CleanExit:
+    Application.Calculation = prevCalc
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+    Exit Sub
+
+CleanFail:
+    On Error Resume Next
+    Application.DisplayAlerts = True
+    Application.Calculation = prevCalc
+    Application.ScreenUpdating = True
+    Application.EnableEvents = True
+End Sub
+
+' =========================
+' CORE LOGIC (per row)
+' =========================
+Private Sub ProcessAssemblyCell(ByVal cell As Range)
+    Dim raw As String
+    Dim baseName As String
+    Dim finalName As String
+    Dim linkedSheet As String
+
+    raw = Trim$(CStr(cell.Value))
+    linkedSheet = Trim$(CStr(Me.Cells(cell.Row, LINK_COL).Value))
+
+    ' Cleared: wipe link; sheet deletion handled by CleanupOrphanAutoSheets
+    If Len(raw) = 0 Then
+        Me.Cells(cell.Row, LINK_COL).Value = vbNullString
+        Exit Sub
+    End If
+
+    baseName = SanitizeSheetName(raw)
+
+    ' Enforce duplicates within the list: zz -> zz_1 -> zz_2 ...
+    finalName = MakeUniqueNameForRow(baseName, cell.Row, linkedSheet)
+
+    ' Write resolved name back to column A
+    If CStr(cell.Value) <> finalName Then cell.Value = finalName
+
+    ' Rename existing linked sheet (rename THAT exact sheet)
+    If Len(linkedSheet) > 0 And WorksheetExists(linkedSheet) Then
+        If StrComp(linkedSheet, finalName, vbTextCompare) <> 0 Then
+            If WorksheetExists(finalName) Then finalName = MakeUniqueSheetName(finalName)
+            ThisWorkbook.Worksheets(linkedSheet).Name = finalName
+            If CStr(cell.Value) <> finalName Then cell.Value = finalName
+        End If
+
+        ConfigureSheet ThisWorkbook.Worksheets(finalName)
+        Me.Cells(cell.Row, LINK_COL).Value = finalName
+        Exit Sub
+    End If
+
+    ' Create new sheet
+    If WorksheetExists(finalName) Then finalName = MakeUniqueSheetName(finalName)
+    If CStr(cell.Value) <> finalName Then cell.Value = finalName
+
+    Dim wsNew As Worksheet
+    Set wsNew = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+    wsNew.Name = finalName
+    ConfigureSheet wsNew
+
+    Me.Cells(cell.Row, LINK_COL).Value = finalName
+End Sub
+
+' =========================
+' RECONCILIATION CLEANUP (multi-row delete safe)
+' =========================
+Private Sub CleanupOrphanAutoSheets()
+    Dim keep As Object
+    Dim lastRow As Long, r As Long
+    Dim nm As String
+    Dim ws As Worksheet
+
+    Set keep = CreateObject("Scripting.Dictionary")
+
+    lastRow = Me.Cells(Me.Rows.Count, 1).End(xlUp).Row
+    If lastRow < 2 Then lastRow = 2
+
+    ' Keep-list from current rows (prefer hidden link col)
+    For r = 2 To lastRow
+        nm = Trim$(CStr(Me.Cells(r, LINK_COL).Value))
+        If Len(nm) = 0 Then
+            nm = Trim$(CStr(Me.Cells(r, 1).Value))
+            If Len(nm) > 0 Then nm = SanitizeSheetName(nm)
+        End If
+        If Len(nm) > 0 Then keep(nm) = True
+    Next r
+
+    ' Delete only auto-created sheets not in keep-list
+    For Each ws In ThisWorkbook.Worksheets
+        If Not IsExcludedSheet(ws.Name) Then
+            If IsAutoSheet(ws) Then
+                If Not keep.exists(ws.Name) Then
+                    Application.DisplayAlerts = False
+                    ws.Delete
+                    Application.DisplayAlerts = True
+                End If
+            End If
+        End If
+    Next ws
+End Sub
+
+Private Function IsExcludedSheet(ByVal n As String) As Boolean
+    IsExcludedSheet = (StrComp(n, EXCLUDE_1, vbTextCompare) = 0) _
+                   Or (StrComp(n, EXCLUDE_2, vbTextCompare) = 0) _
+                   Or (StrComp(n, EXCLUDE_3, vbTextCompare) = 0) _
+                   Or (StrComp(n, EXCLUDE_4, vbTextCompare) = 0) _
+                   Or (StrComp(n, PARTS_LIST_SHEET, vbTextCompare) = 0)
+End Function
+
+Private Function IsAutoSheet(ByVal ws As Worksheet) As Boolean
+    On Error Resume Next
+    IsAutoSheet = (CStr(ws.Range(MARKER_CELL).Value) = MARKER_VALUE)
+    On Error GoTo 0
+End Function
+
+' =========================
+' UNIQUENESS (row-aware)
+' =========================
+Private Function MakeUniqueNameForRow(ByVal baseName As String, ByVal rowNum As Long, ByVal linkedSheet As String) As String
+    Dim candidate As String
+    Dim i As Long
+
+    candidate = baseName
+    If NameAvailableForRow(candidate, rowNum, linkedSheet) Then
+        MakeUniqueNameForRow = candidate
+        Exit Function
+    End If
+
+    For i = 1 To 9999
+        candidate = baseName & "_" & CStr(i)
+        If Len(candidate) > 31 Then candidate = Left$(candidate, 31)
+        If NameAvailableForRow(candidate, rowNum, linkedSheet) Then
+            MakeUniqueNameForRow = candidate
+            Exit Function
+        End If
+    Next i
+
+    MakeUniqueNameForRow = Left$(baseName, 25) & "_" & Format$(Now, "hhmmss")
+End Function
+
+Private Function NameAvailableForRow(ByVal candidate As String, ByVal rowNum As Long, ByVal linkedSheet As String) As Boolean
+    Dim lastRow As Long, r As Long
+    Dim v As String
+
+    lastRow = Me.Cells(Me.Rows.Count, 1).End(xlUp).Row
+    If lastRow < 2 Then lastRow = 2
+
+    For r = 2 To lastRow
+        If r <> rowNum Then
+            v = Trim$(CStr(Me.Cells(r, 1).Value))
+            If Len(v) > 0 Then
+                v = SanitizeSheetName(v)
+                If StrComp(v, candidate, vbTextCompare) = 0 Then
+                    NameAvailableForRow = False
+                    Exit Function
+                End If
+            End If
+        End If
+    Next r
+
+    ' If a sheet exists with that name, only allow if it is THIS row's linked sheet
+    If WorksheetExists(candidate) Then
+        NameAvailableForRow = (Len(linkedSheet) > 0 And StrComp(linkedSheet, candidate, vbTextCompare) = 0)
+        Exit Function
+    End If
+
+    NameAvailableForRow = True
+End Function
+
+' =========================
+' SHEET SETUP
+' =========================
+Private Sub ConfigureSheet(ByVal ws As Worksheet)
+    ' Build/refresh the consolidated dropdown list (MIC + Custom Parts)
+    ' This is the key line that makes the dropdown "live"
+    RefreshPartsDropdown True
+
+    ' Mark as auto-created/managed (if you are using the marker cleanup approach)
+    ws.Range("XFD1").Value = "__AUTO_ASSEMBLY__"
+
+    ' Headers
+    ws.Cells(1, 1).Value = "Part #"
+    ws.Cells(1, 2).Value = "Quantity"
+    ws.Cells(1, 3).Value = "Description"
+
+    ' Data validation now points to the named range (not directly to MIC)
+    With ws.Range("A2:A" & MAX_DATA_ROWS)
+        .Validation.Delete
+        .Validation.Add Type:=xlValidateList, _
+                        AlertStyle:=xlValidAlertStop, _
+                        Operator:=xlBetween, _
+                        Formula1:="=" & PARTS_NAMED_RANGE   ' -> =PartsDropdown
+    End With
+
+    ' Description: lookup MIC first, then Custom Parts
+    ws.Range("C2:C" & MAX_DATA_ROWS).Formula = _
+        "=IF(A2<>""""," & _
+        "IFERROR(VLOOKUP(A2,'MIC'!A:B,2,FALSE)," & _
+        "IFERROR(VLOOKUP(A2,'Custom Parts'!A:B,2,FALSE),"""")),"""")"
+End Sub
+
+
+' =========================
+' COMBINED DROPDOWN LIST (MIC + Custom Parts) ON VERYHIDDEN SHEET
+' =========================
+Private Sub RefreshCombinedPartsDropdown()
+    Dim listWS As Worksheet
+    Dim dict As Object
+    Dim micWS As Worksheet, customWS As Worksheet
+    Dim lastRow As Long, r As Long
+    Dim v As String
+    Dim arr As Variant
+    Dim i As Long
+
+    Set dict = CreateObject("Scripting.Dictionary")
+
+    ' Ensure helper sheet exists and is VeryHidden
+    Set listWS = EnsurePartsListSheet()
+
+    ' Pull from MIC
+    Set micWS = ThisWorkbook.Worksheets("MIC")
+    lastRow = micWS.Cells(micWS.Rows.Count, 1).End(xlUp).Row
+    For r = 1 To lastRow
+        v = Trim$(CStr(micWS.Cells(r, 1).Value))
+        If Len(v) > 0 Then dict(v) = True
+    Next r
+
+    ' Pull from Custom Parts (if it exists)
+    If WorksheetExists("Custom Parts") Then
+        Set customWS = ThisWorkbook.Worksheets("Custom Parts")
+        lastRow = customWS.Cells(customWS.Rows.Count, 1).End(xlUp).Row
+        For r = 1 To lastRow
+            v = Trim$(CStr(customWS.Cells(r, 1).Value))
+            If Len(v) > 0 Then dict(v) = True
+        Next r
+    End If
+
+    ' Write list to helper sheet (column A)
+    listWS.Cells.ClearContents
+    listWS.Range("A1").Value = "Parts"
+
+    If dict.Count = 0 Then
+        listWS.Range("A2").Value = ""
+        UpdateNamedRange listWS, 2
+        Exit Sub
+    End If
+
+    arr = dict.keys
+
+    ' Optional: sort keys for a nicer dropdown
+    If dict.Count > 1 Then QuickSortVariantStrings arr, LBound(arr), UBound(arr)
+
+    For i = LBound(arr) To UBound(arr)
+        listWS.Cells(i + 2, 1).Value = CStr(arr(i))
+    Next i
+
+    UpdateNamedRange listWS, dict.Count + 1 ' header + items
+End Sub
+
+Private Function EnsurePartsListSheet() As Worksheet
+    Dim ws As Worksheet
+
+    If WorksheetExists(PARTS_LIST_SHEET) Then
+        Set ws = ThisWorkbook.Worksheets(PARTS_LIST_SHEET)
+    Else
+        Set ws = ThisWorkbook.Worksheets.Add(After:=ThisWorkbook.Worksheets(ThisWorkbook.Worksheets.Count))
+        ws.Name = PARTS_LIST_SHEET
+    End If
+
+    ws.Visible = xlSheetVeryHidden
+    Set EnsurePartsListSheet = ws
+End Function
+
+Private Sub UpdateNamedRange(ByVal listWS As Worksheet, ByVal lastRow As Long)
+    ' Named range points to listWS!A2:A(lastRow) (excluding header)
+    Dim rng As Range
+    If lastRow < 2 Then lastRow = 2
+    Set rng = listWS.Range("A2:A" & lastRow)
+
+    On Error Resume Next
+    ThisWorkbook.Names(PARTS_NAMED_RANGE).Delete
+    On Error GoTo 0
+
+    ThisWorkbook.Names.Add Name:=PARTS_NAMED_RANGE, RefersTo:=rng
+End Sub
+
+' Simple quicksort for Variant array of strings
+Private Sub QuickSortVariantStrings(ByRef arr As Variant, ByVal first As Long, ByVal last As Long)
+    Dim i As Long, j As Long
+    Dim pivot As String
+    Dim tmp As Variant
+
+    i = first
+    j = last
+    pivot = CStr(arr((first + last) \ 2))
+
+    Do While i <= j
+        Do While CStr(arr(i)) < pivot
+            i = i + 1
+        Loop
+        Do While CStr(arr(j)) > pivot
+            j = j - 1
+        Loop
+        If i <= j Then
+            tmp = arr(i)
+            arr(i) = arr(j)
+            arr(j) = tmp
+            i = i + 1
+            j = j - 1
+        End If
+    Loop
+
+    If first < j Then QuickSortVariantStrings arr, first, j
+    If i < last Then QuickSortVariantStrings arr, i, last
+End Sub
+
+' =========================
+' "HIDE" LINK COLUMN E
+' =========================
+Private Sub MakeLinkColumnInvisible()
+    With Me.Columns(LINK_COL)
+        .Font.Color = vbWhite
+        .Interior.Color = vbWhite
+        .NumberFormat = "@"
+    End With
+End Sub
+
+' =========================
+' UTILITIES
+' =========================
+Private Function WorksheetExists(ByVal n As String) As Boolean
+    Dim ws As Worksheet
+    On Error Resume Next
+    Set ws = ThisWorkbook.Worksheets(n)
+    WorksheetExists = Not ws Is Nothing
+    On Error GoTo 0
+End Function
+
+Private Function SanitizeSheetName(ByVal s As String) As String
+    Dim bad
+    For Each bad In Array(":", "\", "/", "?", "*", "[", "]")
+        s = Replace(s, bad, "_")
+    Next bad
+
+    s = Trim$(WorksheetFunction.Clean(s))
+    If Len(s) = 0 Then s = "Sheet"
+    If Len(s) > 31 Then s = Left$(s, 31)
+
+    SanitizeSheetName = s
+End Function
+
+Private Function MakeUniqueSheetName(ByVal base As String) As String
+    Dim i As Long, n As String
+
+    If Not WorksheetExists(base) Then
+        MakeUniqueSheetName = base
+        Exit Function
+    End If
+
+    For i = 1 To 9999
+        n = base & "_" & i
+        If Len(n) > 31 Then n = Left$(n, 31)
+        If Not WorksheetExists(n) Then
+            MakeUniqueSheetName = n
+            Exit Function
+        End If
+    Next i
+
+    MakeUniqueSheetName = Left$(base, 25) & "_" & Format$(Now, "hhmmss")
+End Function
+
+
