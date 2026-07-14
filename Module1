@@ -1,0 +1,190 @@
+Option Explicit
+
+Sub GenerateBOM()
+    Dim ws As Worksheet
+    Dim bomSheet As Worksheet
+    Dim partDict As Object
+    Dim partSheetsDict As Object
+    Dim excludedSheets As Object
+    
+    Dim cell As Range
+    Dim lastRow As Long
+    Dim partKey As Variant
+    
+    ' Create dictionaries
+    Set partDict = CreateObject("Scripting.Dictionary")
+    Set partSheetsDict = CreateObject("Scripting.Dictionary")
+    Set excludedSheets = CreateObject("Scripting.Dictionary")
+    
+    ' Set reference to the BOM sheet
+    Set bomSheet = ThisWorkbook.Sheets("BOM")
+    
+    ' Clear previous BOM data
+    bomSheet.Range("A2:D" & bomSheet.Rows.Count).ClearContents
+    
+    ' Always exclude these sheets (from the general scan)
+    excludedSheets.Add "BOM", True
+    excludedSheets.Add "MIC", True
+    excludedSheets.Add "Assembly List", True
+    excludedSheets.Add "Custom Parts", True
+    
+    ' Add assemblies from the "Assembly List" sheet to excluded list
+    Set ws = ThisWorkbook.Sheets("Assembly List")
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    
+    For Each cell In ws.Range("A2:A" & lastRow)
+        If Trim(CStr(cell.Value)) <> "" Then
+            excludedSheets(CStr(cell.Value)) = True
+        End If
+    Next cell
+    
+    ' -----------------------------
+    ' 1) General scan of worksheets
+    '    - Process Visible and Hidden sheets
+    '    - Skip VeryHidden sheets
+    '    - Skip excluded sheet names
+    ' -----------------------------
+    For Each ws In ThisWorkbook.Worksheets
+        If ws.Visible <> xlSheetVeryHidden Then
+            If Not excludedSheets.exists(ws.Name) Then
+                
+                lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+                
+                For Each cell In ws.Range("A2:A" & lastRow)
+                    If Trim(CStr(cell.Value)) <> "" Then
+                        partKey = CStr(cell.Value)
+                        
+                        If Not partDict.exists(partKey) Then
+                            partDict.Add partKey, 0
+                            partSheetsDict.Add partKey, ""
+                        End If
+                        
+                        If IsNumeric(cell.Offset(0, 1).Value) Then
+                            partDict(partKey) = partDict(partKey) + CDbl(cell.Offset(0, 1).Value)
+                        End If
+                        
+                        If InStr(1, partSheetsDict(partKey), ws.Name, vbTextCompare) = 0 Then
+                            If partSheetsDict(partKey) = "" Then
+                                partSheetsDict(partKey) = ws.Name
+                            Else
+                                partSheetsDict(partKey) = partSheetsDict(partKey) & ", " & ws.Name
+                            End If
+                        End If
+                    End If
+                Next cell
+                
+            End If
+        End If
+    Next ws
+    
+    ' -----------------------------
+    ' 2) Process the "Assembly List"
+    '    - Multiply assembly parts by assembly qty
+    '    - Skip VeryHidden assembly sheets
+    ' -----------------------------
+    Set ws = ThisWorkbook.Sheets("Assembly List")
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    
+    For Each cell In ws.Range("A2:A" & lastRow)
+        If Trim(CStr(cell.Value)) <> "" Then
+            
+            Dim assemblyName As String
+            Dim assemblyQty As Double
+            
+            assemblyName = CStr(cell.Value)
+            
+            If IsNumeric(cell.Offset(0, 1).Value) Then
+                assemblyQty = CDbl(cell.Offset(0, 1).Value)
+            Else
+                assemblyQty = 0
+            End If
+            
+            If SheetExists(assemblyName) Then
+                Dim assemblySheet As Worksheet
+                Set assemblySheet = ThisWorkbook.Sheets(assemblyName)
+                
+                ' Skip VeryHidden assembly sheets
+                If assemblySheet.Visible <> xlSheetVeryHidden Then
+                    
+                    Dim assemblyLastRow As Long
+                    Dim assemblyCell As Range
+                    
+                    assemblyLastRow = assemblySheet.Cells(assemblySheet.Rows.Count, 1).End(xlUp).Row
+                    
+                    For Each assemblyCell In assemblySheet.Range("A2:A" & assemblyLastRow)
+                        If Trim(CStr(assemblyCell.Value)) <> "" Then
+                            partKey = CStr(assemblyCell.Value)
+                            
+                            If Not partDict.exists(partKey) Then
+                                partDict.Add partKey, 0
+                                partSheetsDict.Add partKey, ""
+                            End If
+                            
+                            If IsNumeric(assemblyCell.Offset(0, 1).Value) Then
+                                partDict(partKey) = partDict(partKey) + (CDbl(assemblyCell.Offset(0, 1).Value) * assemblyQty)
+                            End If
+                            
+                            If InStr(1, partSheetsDict(partKey), assemblySheet.Name, vbTextCompare) = 0 Then
+                                If partSheetsDict(partKey) = "" Then
+                                    partSheetsDict(partKey) = assemblySheet.Name
+                                Else
+                                    partSheetsDict(partKey) = partSheetsDict(partKey) & ", " & assemblySheet.Name
+                                End If
+                            End If
+                        End If
+                    Next assemblyCell
+                    
+                End If
+            End If
+        End If
+    Next cell
+    
+    ' -----------------------------
+    ' 3) Output results to BOM sheet
+    ' -----------------------------
+    Dim i As Long
+    i = 2
+    
+    For Each partKey In partDict.keys
+        bomSheet.Cells(i, 1).Value = partDict(partKey)                 ' Quantity
+        bomSheet.Cells(i, 2).Value = partKey                           ' Part #
+        bomSheet.Cells(i, 3).Value = partSheetsDict(partKey)           ' Sheets
+        bomSheet.Cells(i, 4).Formula = _
+    "=IF(B" & i & "<>""""," & _
+    "IFERROR(VLOOKUP(B" & i & ",MIC!A:B,2,FALSE)," & _
+    "IFERROR(VLOOKUP(B" & i & ",'Custom Parts'!A:B,2,FALSE),""""))," & _
+    """"")"
+
+        i = i + 1
+    Next partKey
+    
+    
+    With bomSheet.Sort
+    .SortFields.Clear
+    .SortFields.Add Key:=bomSheet.Range("B2:B" & i - 1), _
+                    SortOn:=xlSortOnValues, _
+                    Order:=xlAscending, _
+                    DataOption:=xlSortNormal
+
+    .SetRange bomSheet.Range("A1:D" & i - 1)
+    .Header = xlYes
+    .MatchCase = False
+    .Orientation = xlTopToBottom
+    .Apply
+End With
+
+    
+    
+    ' Clean up
+    Set partDict = Nothing
+    Set partSheetsDict = Nothing
+    Set excludedSheets = Nothing
+End Sub
+
+' Function to check if a sheet exists
+Private Function SheetExists(sheetName As String) As Boolean
+    On Error Resume Next
+    SheetExists = Not ThisWorkbook.Sheets(sheetName) Is Nothing
+    On Error GoTo 0
+End Function
+
