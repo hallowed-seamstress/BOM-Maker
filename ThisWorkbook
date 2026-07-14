@@ -1,0 +1,29 @@
+Option Explicit
+
+Private Sub Workbook_Open()
+    On Error Resume Next
+    Application.EnableEvents = False
+    RefreshPartsDropdown True
+    Application.EnableEvents = True
+End Sub
+
+Private Sub Workbook_SheetChange(ByVal Sh As Object, ByVal Target As Range)
+    ' Rebuild the consolidated dropdown whenever MIC or Custom Parts column A changes
+    On Error GoTo SafeExit
+
+    If Sh Is Nothing Then Exit Sub
+
+    If StrComp(Sh.Name, "MIC", vbTextCompare) = 0 Or _
+       StrComp(Sh.Name, "Custom Parts", vbTextCompare) = 0 Then
+
+        If Not Intersect(Target, Sh.Columns(1)) Is Nothing Then
+            Application.EnableEvents = False
+            RefreshPartsDropdown True
+        End If
+    End If
+
+SafeExit:
+    Application.EnableEvents = True
+End Sub
+
+
